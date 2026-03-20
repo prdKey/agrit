@@ -14,13 +14,15 @@ import {
 } from "lucide-react";
 import axios from "axios";
 import { getToken } from "../../services/tokenService.js";
+import { SKALE_RPC } from "../../utils/skaleNetwork.js";
 
 const API_URL               = import.meta.env.VITE_API_URL;
 const ORDER_MANAGER_ADDRESS = import.meta.env.VITE_ORDER_MANAGER_ADDRESS;
 const TOKEN_ADDRESS         = import.meta.env.VITE_TOKEN_ADDRESS;
 const authHeader            = () => ({ Authorization: `Bearer ${getToken()}` });
 
-import { SKALE_RPC } from "../../utils/skaleNetwork.js";
+// Module-level read provider — reused for all reads in this file
+const readProvider = new ethers.JsonRpcProvider(SKALE_RPC);
 
 const TOKEN_ABI = [
   "function approve(address spender, uint256 amount) returns (bool)",
@@ -94,14 +96,12 @@ export default function CheckoutPage() {
   const approveAGT = async (amountInAGT) => {
     if (!walletProvider) throw new Error("Wallet not connected. Please reconnect.");
 
-    const provider     = new ethers.BrowserProvider(walletProvider);
-    const signer       = await provider.getSigner();
-    const owner        = await signer.getAddress();
-
-    const readProvider = new ethers.JsonRpcProvider(SKALE_RPC);
-    const tokenRead    = new ethers.Contract(TOKEN_ADDRESS, TOKEN_ABI, readProvider);
-    const tokenWrite   = new ethers.Contract(TOKEN_ADDRESS, TOKEN_ABI, signer);
-    const amountWei    = ethers.parseEther(String(amountInAGT));
+    const provider   = new ethers.BrowserProvider(walletProvider);
+    const signer     = await provider.getSigner();
+    const owner      = await signer.getAddress();
+    const tokenRead  = new ethers.Contract(TOKEN_ADDRESS, TOKEN_ABI, readProvider);
+    const tokenWrite = new ethers.Contract(TOKEN_ADDRESS, TOKEN_ABI, signer);
+    const amountWei  = ethers.parseEther(String(amountInAGT));
 
     try {
       const allowance = await tokenRead.allowance(owner, ORDER_MANAGER_ADDRESS);
@@ -115,8 +115,7 @@ export default function CheckoutPage() {
 
       // ── Mobile-safe tx confirmation ──────────────────────────────────────
       // tx.wait() uses BrowserProvider polling (eth_blockNumber) which fails
-      // on mobile WalletConnect. Instead, poll for the receipt directly via
-      // the dedicated SKALE JsonRpcProvider.
+      // on mobile WalletConnect. Poll the receipt via dedicated SKALE RPC instead.
       const pollReceipt = async (txHash, retries = 60, intervalMs = 3000) => {
         for (let i = 0; i < retries; i++) {
           try {
@@ -166,8 +165,14 @@ export default function CheckoutPage() {
       setBalanceLoading(true);
       try {
         if (!isConnected || !connectedAddress) { setAgtBalance(null); return; }
-        const balance = await getBalance(connectedAddress);
-        if (!cancelled) setAgtBalance(Number(balance));
+        // Use readProvider directly — avoids eth_blockNumber via BrowserProvider on mobile
+        const tokenRead = new ethers.Contract(
+          TOKEN_ADDRESS,
+          ["function balanceOf(address) view returns (uint256)"],
+          readProvider
+        );
+        const raw = await tokenRead.balanceOf(connectedAddress);
+        if (!cancelled) setAgtBalance(Number(ethers.formatEther(raw)));
       } catch (err) {
         console.error("Balance check failed:", err);
         if (!cancelled) setAgtBalance(null);
@@ -251,7 +256,13 @@ export default function CheckoutPage() {
     setBalanceLoading(true);
 
     try {
-      const latestBalance = Number(await getBalance(connectedAddress));
+      const tokenRead = new ethers.Contract(
+        TOKEN_ADDRESS,
+        ["function balanceOf(address) view returns (uint256)"],
+        readProvider
+      );
+      const raw = await tokenRead.balanceOf(connectedAddress);
+      const latestBalance = Number(ethers.formatEther(raw));
       setAgtBalance(latestBalance);
       if (latestBalance < total) {
         setSubmitError(`Insufficient AGT balance. You need ${total.toFixed(4)} AGT but your wallet only has ${latestBalance.toFixed(4)} AGT. You're short by ${(total - latestBalance).toFixed(4)} AGT.`);
