@@ -14,13 +14,12 @@ import {
 } from "lucide-react";
 import axios from "axios";
 import { getToken } from "../../services/tokenService.js";
+import { SKALE_RPC } from "../../utils/skaleNetwork.js";
 
 const API_URL               = import.meta.env.VITE_API_URL;
 const ORDER_MANAGER_ADDRESS = import.meta.env.VITE_ORDER_MANAGER_ADDRESS;
 const TOKEN_ADDRESS         = import.meta.env.VITE_TOKEN_ADDRESS;
 const authHeader            = () => ({ Authorization: `Bearer ${getToken()}` });
-
-const SKALE_RPC = "https://juicy-low-small-testnet.skalenodes.com/v1";
 
 const TOKEN_ABI = [
   "function approve(address spender, uint256 amount) returns (bool)",

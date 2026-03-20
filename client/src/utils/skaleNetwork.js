@@ -4,6 +4,10 @@
 // RPC      : https://testnet.skalenodes.com/v1/juicy-low-small-testnet
 // Explorer : https://juicy-low-small-testnet.explorer.testnet.skalenodes.com
 
+// Single source of truth for the RPC URL — import this everywhere
+// instead of hardcoding the URL in each file.
+export const SKALE_RPC = "https://testnet.skalenodes.com/v1/juicy-low-small-testnet";
+
 const SKALE_EUROPA_TESTNET = {
   chainId:         "0x561bf78b",
   chainName:       "SKALE Europa Hub Testnet",

@@ -3,11 +3,17 @@
 import axios        from "axios";
 import { ethers }   from "ethers";
 import { getToken } from "./tokenService";
+import { SKALE_RPC } from "../utils/skaleNetwork.js";
 
 const API_URL               = import.meta.env.VITE_API_URL;
 const ORDER_MANAGER_ADDRESS = import.meta.env.VITE_ORDER_MANAGER_ADDRESS;
 const TOKEN_ADDRESS         = import.meta.env.VITE_TOKEN_ADDRESS;
 const authHeader            = () => ({ Authorization: `Bearer ${getToken()}` });
+
+// ── Dedicated SKALE RPC for READ calls ───────────────────────────────────────
+// Using a direct JsonRpcProvider for reads avoids the mobile BrowserProvider
+// instability (eth_blockNumber coalesce errors on WalletConnect/mobile).
+const readProvider   = new ethers.JsonRpcProvider(SKALE_RPC);
 
 const TOKEN_ABI = [
   "function approve(address spender, uint256 amount) returns (bool)",
@@ -15,18 +21,40 @@ const TOKEN_ABI = [
 ];
 
 // ── Approve AGT spending via AppKit walletProvider ───────────────────────────
-// walletProvider is passed in from the component using useAppKitProvider("eip155")
+// - READ  (allowance check) → dedicated SKALE JsonRpcProvider  ✓ mobile-safe
+// - WRITE (approve tx)      → BrowserProvider from walletProvider
 const approveAGT = async (amountInAGT, walletProvider) => {
   if (!walletProvider) throw new Error("Wallet not connected");
+
   const provider  = new ethers.BrowserProvider(walletProvider);
   const signer    = await provider.getSigner();
   const owner     = await signer.getAddress();
-  const token     = new ethers.Contract(TOKEN_ADDRESS, TOKEN_ABI, signer);
   const amountWei = ethers.parseEther(String(amountInAGT));
-  const allowance = await token.allowance(owner, ORDER_MANAGER_ADDRESS);
+
+  // Use dedicated read provider for allowance — avoids mobile RPC coalesce error
+  const tokenRead = new ethers.Contract(TOKEN_ADDRESS, TOKEN_ABI, readProvider);
+  let allowance;
+  try {
+    allowance = await tokenRead.allowance(owner, ORDER_MANAGER_ADDRESS);
+  } catch (err) {
+    // If read still fails (e.g. network hiccup), proceed with approve anyway
+    console.warn("[approveAGT] allowance check failed, proceeding with approve:", err.message);
+    allowance = BigInt(0);
+  }
+
   if (allowance >= amountWei) return;
-  const tx = await token.approve(ORDER_MANAGER_ADDRESS, amountWei);
-  await tx.wait();
+
+  // Write via wallet signer
+  const tokenWrite = new ethers.Contract(TOKEN_ADDRESS, TOKEN_ABI, signer);
+  try {
+    const tx = await tokenWrite.approve(ORDER_MANAGER_ADDRESS, amountWei);
+    await tx.wait();
+  } catch (err) {
+    if (err.code === 4001 || err.message?.includes("rejected")) {
+      throw new Error("Transaction rejected. Please approve in your wallet.");
+    }
+    throw err;
+  }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -54,10 +82,6 @@ export const checkoutOrder = async (items, deliveryAddress, totalPrice) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // checkoutAll — groups cart items by sellerAddress, approves cumulative
 // total ONCE, then places one order per seller group.
-//
-// walletProvider must be passed from the component:
-//   const { walletProvider } = useAppKitProvider("eip155")
-//   await checkoutAll(items, deliveryAddress, walletProvider)
 // ─────────────────────────────────────────────────────────────────────────────
 export const checkoutAll = async (items, deliveryAddress, walletProvider) => {
   if (!items || items.length === 0) throw new Error("No items to checkout");
@@ -78,7 +102,6 @@ export const checkoutAll = async (items, deliveryAddress, walletProvider) => {
     return sum + groupSubtotal + groupPlatform + 50;
   }, 0);
 
-  // Pass walletProvider instead of window.ethereum
   await approveAGT(cumulativeTotal, walletProvider);
 
   const orderIds = [];
