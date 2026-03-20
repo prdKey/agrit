@@ -21,13 +21,46 @@ const ORDER_MANAGER_ADDRESS = import.meta.env.VITE_ORDER_MANAGER_ADDRESS;
 const TOKEN_ADDRESS         = import.meta.env.VITE_TOKEN_ADDRESS;
 const authHeader            = () => ({ Authorization: `Bearer ${getToken()}` });
 
-// Module-level read provider — reused for all reads in this file
-const readProvider = new ethers.JsonRpcProvider(SKALE_RPC);
+// ── Raw JSON-RPC helpers (mobile-safe, no ethers polling) ────────────────────
+const rpcCall = async (method, params) => {
+  const res = await fetch(SKALE_RPC, {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body:    JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+  });
+  const json = await res.json();
+  if (json.error) throw new Error(json.error.message);
+  return json.result;
+};
 
-const TOKEN_ABI = [
-  "function approve(address spender, uint256 amount) returns (bool)",
-  "function allowance(address owner, address spender) view returns (uint256)",
-];
+const encodeAllowance = (owner, spender) => {
+  const sig = "0xdd62ed3e";
+  const pad = (addr) => addr.replace("0x", "").toLowerCase().padStart(64, "0");
+  return sig + pad(owner) + pad(spender);
+};
+
+const encodeApprove = (spender, amountWei) => {
+  const sig    = "0x095ea7b3";
+  const pad    = (addr) => addr.replace("0x", "").toLowerCase().padStart(64, "0");
+  const padInt = (n)    => BigInt(n).toString(16).padStart(64, "0");
+  return sig + pad(spender) + padInt(amountWei);
+};
+
+const encodeBalanceOf = (addr) => {
+  const sig = "0x70a08231"; // keccak256("balanceOf(address)")[0:4]
+  return sig + addr.replace("0x", "").toLowerCase().padStart(64, "0");
+};
+
+const pollReceiptRaw = async (txHash, retries = 60, intervalMs = 3000) => {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const receipt = await rpcCall("eth_getTransactionReceipt", [txHash]);
+      if (receipt) return receipt;
+    } catch (_) { /* transient — keep polling */ }
+    await new Promise(r => setTimeout(r, intervalMs));
+  }
+  throw new Error("Transaction confirmation timed out. Please check your wallet.");
+};
 
 const STEPS = [
   { id: 0, label: "Cart",    icon: ShoppingBag },
@@ -96,44 +129,41 @@ export default function CheckoutPage() {
   const approveAGT = async (amountInAGT) => {
     if (!walletProvider) throw new Error("Wallet not connected. Please reconnect.");
 
-    const provider   = new ethers.BrowserProvider(walletProvider);
-    const signer     = await provider.getSigner();
-    const owner      = await signer.getAddress();
-    const tokenRead  = new ethers.Contract(TOKEN_ADDRESS, TOKEN_ABI, readProvider);
-    const tokenWrite = new ethers.Contract(TOKEN_ADDRESS, TOKEN_ABI, signer);
-    const amountWei  = ethers.parseEther(String(amountInAGT));
+    const accounts = await walletProvider.request({ method: "eth_accounts" });
+    const owner    = accounts[0];
+    if (!owner) throw new Error("No account found. Please reconnect your wallet.");
 
+    const amountWei = ethers.parseEther(String(amountInAGT));
+
+    // READ: allowance via raw fetch — zero BrowserProvider/ethers polling
+    let skipApprove = false;
     try {
-      const allowance = await tokenRead.allowance(owner, ORDER_MANAGER_ADDRESS);
-      if (allowance >= amountWei) return;
+      const data   = encodeAllowance(owner, ORDER_MANAGER_ADDRESS);
+      const result = await rpcCall("eth_call", [{ to: TOKEN_ADDRESS, data }, "latest"]);
+      if (BigInt(result) >= amountWei) skipApprove = true;
     } catch (err) {
       console.warn("allowance check failed, proceeding with approve:", err.message);
     }
 
+    if (skipApprove) return;
+
+    // WRITE: approve via raw wallet request
+    const data = encodeApprove(ORDER_MANAGER_ADDRESS, amountWei);
+    let txHash;
     try {
-      const tx = await tokenWrite.approve(ORDER_MANAGER_ADDRESS, amountWei);
-
-      // ── Mobile-safe tx confirmation ──────────────────────────────────────
-      // tx.wait() uses BrowserProvider polling (eth_blockNumber) which fails
-      // on mobile WalletConnect. Poll the receipt via dedicated SKALE RPC instead.
-      const pollReceipt = async (txHash, retries = 60, intervalMs = 3000) => {
-        for (let i = 0; i < retries; i++) {
-          try {
-            const receipt = await readProvider.getTransactionReceipt(txHash);
-            if (receipt) return receipt;
-          } catch (_) { /* ignore transient errors, keep polling */ }
-          await new Promise(r => setTimeout(r, intervalMs));
-        }
-        throw new Error("Transaction confirmation timed out. Please check your wallet.");
-      };
-
-      await pollReceipt(tx.hash);
+      txHash = await walletProvider.request({
+        method: "eth_sendTransaction",
+        params: [{ from: owner, to: TOKEN_ADDRESS, data }],
+      });
     } catch (err) {
       if (err.code === 4001 || err.message?.includes("rejected")) {
         throw new Error("Transaction rejected. Please approve in your wallet.");
       }
       throw err;
     }
+
+    // CONFIRM: poll receipt via raw fetch — no ethers polling
+    await pollReceiptRaw(txHash);
   };
 
   useEffect(() => {
@@ -165,14 +195,9 @@ export default function CheckoutPage() {
       setBalanceLoading(true);
       try {
         if (!isConnected || !connectedAddress) { setAgtBalance(null); return; }
-        // Use readProvider directly — avoids eth_blockNumber via BrowserProvider on mobile
-        const tokenRead = new ethers.Contract(
-          TOKEN_ADDRESS,
-          ["function balanceOf(address) view returns (uint256)"],
-          readProvider
-        );
-        const raw = await tokenRead.balanceOf(connectedAddress);
-        if (!cancelled) setAgtBalance(Number(ethers.formatEther(raw)));
+        const data   = encodeBalanceOf(connectedAddress);
+        const result = await rpcCall("eth_call", [{ to: TOKEN_ADDRESS, data }, "latest"]);
+        if (!cancelled) setAgtBalance(Number(ethers.formatEther(BigInt(result))));
       } catch (err) {
         console.error("Balance check failed:", err);
         if (!cancelled) setAgtBalance(null);
@@ -256,13 +281,9 @@ export default function CheckoutPage() {
     setBalanceLoading(true);
 
     try {
-      const tokenRead = new ethers.Contract(
-        TOKEN_ADDRESS,
-        ["function balanceOf(address) view returns (uint256)"],
-        readProvider
-      );
-      const raw = await tokenRead.balanceOf(connectedAddress);
-      const latestBalance = Number(ethers.formatEther(raw));
+      const data          = encodeBalanceOf(connectedAddress);
+      const result        = await rpcCall("eth_call", [{ to: TOKEN_ADDRESS, data }, "latest"]);
+      const latestBalance = Number(ethers.formatEther(BigInt(result)));
       setAgtBalance(latestBalance);
       if (latestBalance < total) {
         setSubmitError(`Insufficient AGT balance. You need ${total.toFixed(4)} AGT but your wallet only has ${latestBalance.toFixed(4)} AGT. You're short by ${(total - latestBalance).toFixed(4)} AGT.`);

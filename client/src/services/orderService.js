@@ -15,61 +15,88 @@ const authHeader            = () => ({ Authorization: `Bearer ${getToken()}` });
 // instability (eth_blockNumber coalesce errors on WalletConnect/mobile).
 const readProvider   = new ethers.JsonRpcProvider(SKALE_RPC);
 
-const TOKEN_ABI = [
-  "function approve(address spender, uint256 amount) returns (bool)",
-  "function allowance(address owner, address spender) view returns (uint256)",
-];
+// ── Raw JSON-RPC helpers (mobile-safe, no ethers polling) ────────────────────
 
-// ── Approve AGT spending via AppKit walletProvider ───────────────────────────
-// - READ  (allowance check) → dedicated SKALE JsonRpcProvider  ✓ mobile-safe
-// - WRITE (approve tx)      → BrowserProvider from walletProvider
+// Raw read via direct HTTP fetch to SKALE RPC — zero BrowserProvider involvement
+const rpcCall = async (method, params) => {
+  const res = await fetch(SKALE_RPC, {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body:    JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+  });
+  const json = await res.json();
+  if (json.error) throw new Error(json.error.message);
+  return json.result;
+};
+
+// Encode allowance(owner, spender) call data
+const encodeAllowance = (owner, spender) => {
+  const sig    = "0xdd62ed3e"; // keccak256("allowance(address,address)")[0:4]
+  const pad    = (addr) => addr.replace("0x", "").toLowerCase().padStart(64, "0");
+  return sig + pad(owner) + pad(spender);
+};
+
+// Encode approve(spender, amount) call data
+const encodeApprove = (spender, amountWei) => {
+  const sig    = "0x095ea7b3"; // keccak256("approve(address,uint256)")[0:4]
+  const pad    = (addr) => addr.replace("0x", "").toLowerCase().padStart(64, "0");
+  const padInt = (n)    => BigInt(n).toString(16).padStart(64, "0");
+  return sig + pad(spender) + padInt(amountWei);
+};
+
+// Poll tx receipt via direct HTTP — no ethers provider needed
+const pollReceiptRaw = async (txHash, retries = 60, intervalMs = 3000) => {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const receipt = await rpcCall("eth_getTransactionReceipt", [txHash]);
+      if (receipt) return receipt;
+    } catch (_) { /* transient — keep polling */ }
+    await new Promise(r => setTimeout(r, intervalMs));
+  }
+  throw new Error("Transaction confirmation timed out. Please check your wallet.");
+};
+
+// ── Approve AGT spending (fully mobile-safe, no ethers polling) ──────────────
 const approveAGT = async (amountInAGT, walletProvider) => {
   if (!walletProvider) throw new Error("Wallet not connected");
 
-  const provider  = new ethers.BrowserProvider(walletProvider);
-  const signer    = await provider.getSigner();
-  const owner     = await signer.getAddress();
+  // Get signer address via wallet (this is a simple request, no polling)
+  const accounts = await walletProvider.request({ method: "eth_accounts" });
+  const owner    = accounts[0];
+  if (!owner) throw new Error("No account found. Please reconnect your wallet.");
+
   const amountWei = ethers.parseEther(String(amountInAGT));
 
-  // Use dedicated read provider for allowance — avoids mobile RPC coalesce error
-  const tokenRead = new ethers.Contract(TOKEN_ADDRESS, TOKEN_ABI, readProvider);
-  let allowance;
+  // ── READ: allowance via raw fetch to SKALE RPC ───────────────────────────
+  let skipApprove = false;
   try {
-    allowance = await tokenRead.allowance(owner, ORDER_MANAGER_ADDRESS);
+    const data   = encodeAllowance(owner, ORDER_MANAGER_ADDRESS);
+    const result = await rpcCall("eth_call", [{ to: TOKEN_ADDRESS, data }, "latest"]);
+    const allowance = BigInt(result);
+    if (allowance >= amountWei) skipApprove = true;
   } catch (err) {
-    // If read still fails (e.g. network hiccup), proceed with approve anyway
     console.warn("[approveAGT] allowance check failed, proceeding with approve:", err.message);
-    allowance = BigInt(0);
   }
 
-  if (allowance >= amountWei) return;
+  if (skipApprove) return;
 
-  // Write via wallet signer
-  const tokenWrite = new ethers.Contract(TOKEN_ADDRESS, TOKEN_ABI, signer);
+  // ── WRITE: approve via raw wallet request — no ethers Contract ───────────
+  const data = encodeApprove(ORDER_MANAGER_ADDRESS, amountWei);
+  let txHash;
   try {
-    const tx = await tokenWrite.approve(ORDER_MANAGER_ADDRESS, amountWei);
-
-    // ── Mobile-safe tx confirmation ────────────────────────────────────────
-    // tx.wait() uses BrowserProvider polling (eth_blockNumber) which fails
-    // on mobile WalletConnect. Poll the receipt via dedicated SKALE RPC instead.
-    const pollReceipt = async (txHash, retries = 60, intervalMs = 3000) => {
-      for (let i = 0; i < retries; i++) {
-        try {
-          const receipt = await readProvider.getTransactionReceipt(txHash);
-          if (receipt) return receipt;
-        } catch (_) { /* ignore transient errors, keep polling */ }
-        await new Promise(r => setTimeout(r, intervalMs));
-      }
-      throw new Error("Transaction confirmation timed out. Please check your wallet.");
-    };
-
-    await pollReceipt(tx.hash);
+    txHash = await walletProvider.request({
+      method: "eth_sendTransaction",
+      params: [{ from: owner, to: TOKEN_ADDRESS, data }],
+    });
   } catch (err) {
     if (err.code === 4001 || err.message?.includes("rejected")) {
       throw new Error("Transaction rejected. Please approve in your wallet.");
     }
     throw err;
   }
+
+  // ── CONFIRM: poll receipt via raw fetch — no BrowserProvider polling ─────
+  await pollReceiptRaw(txHash);
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
