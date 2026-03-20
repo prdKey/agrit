@@ -6,14 +6,18 @@ import { useUserContext } from "../context/UserContext.jsx";
 import { getNonce, verifySignature } from "../services/authService.js";
 import { getPangasinanCities, getBarangaysByCity } from "../services/addressService.js";
 import { ensureSFuel } from "../services/sFuelService.js";
+import { validateField, validateAll, isFormValid } from "../utils/formValidation.js";
+import { switchToSkaleNetwork } from "../utils/skaleNetwork.js";
 
 export default function Register() {
   const { login } = useUserContext();
-  const navigate = useNavigate();
-  const [loading, setLoading] = useState(false);
+  const navigate  = useNavigate();
+  const [loading,      setLoading]      = useState(false);
+  const [networkError, setNetworkError] = useState("");
 
-  const [cities, setCities] = useState([]);
+  const [cities,    setCities]    = useState([]);
   const [barangays, setBarangays] = useState([]);
+  const [errors,    setErrors]    = useState({});
 
   const [formData, setFormData] = useState({
     firstName: "", lastName: "", email: "", phone: "",
@@ -21,14 +25,12 @@ export default function Register() {
     barangay: "", city: "", postalCode: "",
   });
 
-  // @reown/appkit hooks
-  const { open } = useAppKit();
+  const { open }                 = useAppKit();
   const { address, isConnected } = useAppKitAccount();
-  const { walletProvider } = useAppKitProvider("eip155");
-
-  // Auto-trigger signing after wallet connects
+  const { walletProvider }       = useAppKitProvider("eip155");
   const [pendingSubmit, setPendingSubmit] = useState(false);
 
+  // Auto-trigger sign after wallet connects
   useEffect(() => {
     if (isConnected && address && walletProvider && pendingSubmit) {
       handleSign(address, walletProvider);
@@ -59,17 +61,36 @@ export default function Register() {
     loadBarangays();
   }, [formData.city, cities]);
 
+  // ── Real-time validation ──────────────────────────────────────────────────
+  const validateOne = (name, value) => {
+    setErrors(prev => ({ ...prev, [name]: validateField(name, value) }));
+  };
+
   const handleChange = (e) => {
     const { name, value } = e.target;
     if (name === "city") {
       setFormData(prev => ({ ...prev, city: value, barangay: "" }));
+      validateOne("city", value);
       return;
     }
     setFormData(prev => ({ ...prev, [name]: value }));
+    validateOne(name, value);
   };
 
   const handleSign = async (walletAddress, provider) => {
+    setNetworkError("");
     try {
+      // ── 1. Switch / add SKALE network ─────────────────────────────────
+      try {
+        await switchToSkaleNetwork(provider);
+      } catch (netErr) {
+        setNetworkError("Please switch to SKALE Europa Hub Testnet to continue.");
+        setLoading(false);
+        setPendingSubmit(false);
+        return;
+      }
+
+      // ── 2. Get nonce & register ────────────────────────────────────────
       const nonce = await getNonce(
         walletAddress,
         formData.firstName, formData.lastName, formData.email,
@@ -79,9 +100,9 @@ export default function Register() {
       );
 
       const ethersProvider = new BrowserProvider(provider);
-      const signer = await ethersProvider.getSigner();
-      const messageToSign = `Sign this message to authenticate: ${nonce}`;
-      const signature = await signer.signMessage(messageToSign);
+      const signer         = await ethersProvider.getSigner();
+      const messageToSign  = `Sign this message to authenticate: ${nonce}`;
+      const signature      = await signer.signMessage(messageToSign);
 
       const user = await verifySignature(walletAddress, signature);
       login(user);
@@ -99,15 +120,18 @@ export default function Register() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    setNetworkError("");
+
+    const allErrors = validateAll(formData);
+    setErrors(allErrors);
+    if (!isFormValid(allErrors)) return;
+
     setLoading(true);
     try {
       if (!isConnected) {
-        // Opens AppKit modal — works on desktop AND mobile
         setPendingSubmit(true);
         await open();
-        // handleSign will fire via useEffect once wallet connects
       } else {
-        // Already connected, just sign
         await handleSign(address, walletProvider);
       }
     } catch (err) {
@@ -118,7 +142,9 @@ export default function Register() {
     }
   };
 
+  const hasAnyError    = Object.values(errors).some(Boolean);
   const isFormComplete = Object.values(formData).every(v => v.trim() !== "");
+  const canSubmit      = isFormComplete && !hasAnyError && !loading;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -129,43 +155,59 @@ export default function Register() {
           <h1 className="text-2xl font-bold mb-2 text-center">Welcome</h1>
           <p className="text-gray-500 text-center">Register your wallet to continue.</p>
         </div>
+
+        {/* Network error banner */}
+        {networkError && (
+          <div className="mb-4 px-4 py-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-600 flex items-start gap-2">
+            <span className="mt-0.5">⚠️</span>
+            <span>{networkError}</span>
+          </div>
+        )}
+
         <form onSubmit={handleSubmit}>
           <div className="overflow-y-auto max-h-[40vh] p-2 space-y-3 scroll">
-            <InputField label="First Name"        name="firstName"   value={formData.firstName}   onChange={handleChange} />
-            <InputField label="Last Name"         name="lastName"    value={formData.lastName}    onChange={handleChange} />
-            <InputField label="Email"             name="email"       type="email" value={formData.email} onChange={handleChange} />
-            <InputField label="Phone Number"      name="phone"       type="tel"   value={formData.phone} onChange={handleChange} pattern="^(09\d{9}|\+639\d{9})$" />
-            <SelectField label="Gender"           name="gender"      value={formData.gender}      onChange={handleChange} options={["Male","Female","Other"]} />
-            <InputField label="Date of Birth"     name="dob"         type="date"  value={formData.dob}   onChange={handleChange} />
-            <InputField label="House/Unit Number" name="houseNumber" value={formData.houseNumber} onChange={handleChange} />
-            <InputField label="Street"            name="street"      value={formData.street}      onChange={handleChange} />
+            <ValidatedInput label="First Name"        name="firstName"   value={formData.firstName}   onChange={handleChange} error={errors.firstName} />
+            <ValidatedInput label="Last Name"         name="lastName"    value={formData.lastName}    onChange={handleChange} error={errors.lastName} />
+            <ValidatedInput label="Email"             name="email"       type="email" value={formData.email} onChange={handleChange} error={errors.email} />
+            <ValidatedInput label="Phone Number"      name="phone"       type="tel"   value={formData.phone} onChange={handleChange} error={errors.phone} placeholder="09XXXXXXXXX" />
+            <SelectField    label="Gender"            name="gender"      value={formData.gender}      onChange={handleChange} options={["Male","Female","Other"]} />
+            <ValidatedInput label="Date of Birth"     name="dob"         type="date"  value={formData.dob} onChange={handleChange} error={errors.dob}
+              max={new Date().toISOString().split("T")[0]} />
+            <ValidatedInput label="House/Unit Number" name="houseNumber" value={formData.houseNumber} onChange={handleChange} error={errors.houseNumber} />
+            <ValidatedInput label="Street"            name="street"      value={formData.street}      onChange={handleChange} error={errors.street} />
+
+            {/* City select */}
             <div>
               <label className="block font-medium mb-1">City / Municipality</label>
               <select name="city" value={formData.city} onChange={handleChange}
-                className="w-full border rounded-lg p-2 focus:ring-2 focus:ring-green-400" required>
+                className={`w-full border rounded-lg p-2 focus:ring-2 focus:ring-green-400 ${errors.city ? "border-red-400 bg-red-50" : "border-gray-300"}`}
+                required>
                 <option value="">Select City / Municipality</option>
                 {cities.map(city => <option key={city.code} value={city.name}>{city.name}</option>)}
               </select>
+              {errors.city && <p className="text-xs text-red-500 mt-1 flex items-center gap-1"><span>⚠</span> {errors.city}</p>}
             </div>
+
+            {/* Barangay select */}
             <div>
               <label className="block font-medium mb-1">Barangay</label>
               <select name="barangay" value={formData.barangay} onChange={handleChange}
-                className="w-full border rounded-lg p-2 focus:ring-2 focus:ring-green-400"
+                className={`w-full border rounded-lg p-2 focus:ring-2 focus:ring-green-400 ${errors.barangay ? "border-red-400 bg-red-50" : "border-gray-300"}`}
                 required disabled={!formData.city}>
-                <option value="">Select Barangay</option>
+                <option value="">{formData.city ? "Select Barangay" : "Select city first"}</option>
                 {barangays.map(b => <option key={b.code} value={b.name}>{b.name}</option>)}
               </select>
+              {errors.barangay && <p className="text-xs text-red-500 mt-1 flex items-center gap-1"><span>⚠</span> {errors.barangay}</p>}
             </div>
-            <InputField label="Postal Code" name="postalCode" value={formData.postalCode} onChange={handleChange} />
+
+            <ValidatedInput label="Postal Code" name="postalCode" value={formData.postalCode} onChange={handleChange} error={errors.postalCode} placeholder="e.g. 2400" />
           </div>
+
           <div className="flex flex-col justify-center mt-5">
-            <button
-              type="submit"
-              disabled={!isFormComplete || loading}
+            <button type="submit" disabled={!canSubmit}
               className={`w-full p-2 rounded-lg text-white transition ${
-                isFormComplete && !loading ? "bg-green-500 hover:bg-green-600" : "bg-gray-400 cursor-not-allowed"
-              }`}
-            >
+                canSubmit ? "bg-green-500 hover:bg-green-600" : "bg-gray-400 cursor-not-allowed"
+              }`}>
               {loading ? "Processing..." : "Register"}
             </button>
 
@@ -189,13 +231,16 @@ export default function Register() {
   );
 }
 
-function InputField({ label, name, type = "text", value, onChange, pattern }) {
+function ValidatedInput({ label, name, type = "text", value, onChange, error, placeholder, max }) {
   return (
     <div>
       <label className="block text-gray-700 font-medium mb-1">{label}</label>
-      <input type={type} name={name} value={value} onChange={onChange} pattern={pattern}
-        className="w-full border border-gray-300 rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-green-400"
-        required />
+      <input type={type} name={name} value={value} onChange={onChange}
+        placeholder={placeholder} max={max}
+        className={`w-full border rounded-lg p-2 focus:outline-none focus:ring-2 transition-colors ${
+          error ? "border-red-400 focus:ring-red-300 bg-red-50" : "border-gray-300 focus:ring-green-400"
+        }`} required />
+      {error && <p className="text-xs text-red-500 mt-1 flex items-center gap-1"><span>⚠</span> {error}</p>}
     </div>
   );
 }

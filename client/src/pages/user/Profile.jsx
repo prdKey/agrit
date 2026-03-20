@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react';
 import { useUserContext } from "../../context/UserContext.jsx";
 import { getProfile, updateProfile } from "../../services/userService.js";
 import { uploadImageToPinata } from "../../services/uploadImgService.js";
+import { getPangasinanCities, getBarangaysByCity } from "../../services/addressService.js";
+import { validateField, validateAll, isFormValid } from "../../utils/formValidation.js";
 import { User, Mail, Phone, Calendar, MapPin, Wallet, Camera, Edit2, X, Save, Loader2 } from "lucide-react";
 
 const PINATA_GATEWAY = "https://bronze-magnificent-constrictor-556.mypinata.cloud/ipfs/";
@@ -19,11 +21,22 @@ const BLANK = {
   profileImage:  null,
 };
 
+const flatValidated = (form) => ({
+  firstName:    form.firstName,
+  middleName:   form.middleName,
+  lastName:     form.lastName,
+  email:        form.email,
+  mobileNumber: form.mobileNumber,
+  dateOfBirth:  form.dateOfBirth,
+  ...(form.address ?? {}),
+});
+
 export default function Profile() {
   const { setUser } = useUserContext();
 
   const [form, setForm]                     = useState(BLANK);
   const [backup, setBackup]                 = useState(BLANK);
+  const [errors, setErrors]                 = useState({});
   const [isEditing, setIsEditing]           = useState(false);
   const [imagePreview, setImagePreview]     = useState(null);
   const [uploading, setUploading]           = useState(false);
@@ -31,9 +44,38 @@ export default function Profile() {
   const [loadingProfile, setLoadingProfile] = useState(true);
   const [role, setRole]                     = useState("");
 
+  // ── City / Barangay lists ─────────────────────────────────────────────────
+  const [cities,    setCities]    = useState([]);
+  const [barangays, setBarangays] = useState([]);
+
+  useEffect(() => {
+    const loadCities = async () => {
+      try {
+        const res = await getPangasinanCities();
+        setCities(res.data.sort((a, b) => a.name.localeCompare(b.name)));
+      } catch (err) { console.error("Failed to load cities:", err); }
+    };
+    loadCities();
+  }, []);
+
+  // Reload barangays whenever city changes
+  useEffect(() => {
+    const loadBarangays = async () => {
+      const city = form.address?.city;
+      if (!city) { setBarangays([]); return; }
+      const selected = cities.find(c => c.name === city);
+      if (!selected) return;
+      try {
+        const res = await getBarangaysByCity(selected.code);
+        setBarangays(res.data.sort((a, b) => a.name.localeCompare(b.name)));
+      } catch (err) { console.error("Failed to load barangays:", err); }
+    };
+    loadBarangays();
+  }, [form.address?.city, cities]);
+
   // ── Fetch profile on mount ────────────────────────────────────────────────
   useEffect(() => {
-    const fetch = async () => {
+    const load = async () => {
       try {
         setLoadingProfile(true);
         const u = await getProfile();
@@ -59,18 +101,32 @@ export default function Profile() {
         setLoadingProfile(false);
       }
     };
-    fetch();
+    load();
   }, []);
+
+  // ── Real-time validation ──────────────────────────────────────────────────
+  const validateOne = (name, value) => {
+    setErrors(prev => ({ ...prev, [name]: validateField(name, value) }));
+  };
 
   // ── Handlers ──────────────────────────────────────────────────────────────
   const handleChange = (e) => {
     const { name, value } = e.target;
     setForm(prev => ({ ...prev, [name]: value }));
+    validateOne(name, value);
   };
 
   const handleAddressChange = (e) => {
     const { name, value } = e.target;
+    if (name === "city") {
+      // Reset barangay when city changes
+      setForm(prev => ({ ...prev, address: { ...prev.address, city: value, barangay: "" } }));
+      validateOne("city", value);
+      validateOne("barangay", "");
+      return;
+    }
     setForm(prev => ({ ...prev, address: { ...prev.address, [name]: value } }));
+    validateOne(name, value);
   };
 
   const handleImageChange = async (e) => {
@@ -90,22 +146,27 @@ export default function Profile() {
   };
 
   const handleEdit = () => {
-    setBackup({ ...form });
+    setBackup({ ...form, address: { ...form.address } });
+    setErrors({});
     setIsEditing(true);
   };
 
   const handleCancel = () => {
-    setForm({ ...backup });
+    setForm({ ...backup, address: { ...backup.address } });
+    setErrors({});
     setImagePreview(null);
     setIsEditing(false);
   };
 
   const handleSave = async () => {
+    const allErrors = validateAll(flatValidated(form));
+    setErrors(allErrors);
+    if (!isFormValid(allErrors)) return;
     try {
       setSaving(true);
       const updated = await updateProfile(form);
       if (setUser) setUser(updated);
-      setBackup({ ...form });
+      setBackup({ ...form, address: { ...form.address } });
       setIsEditing(false);
       setImagePreview(null);
     } catch (err) {
@@ -127,10 +188,26 @@ export default function Profile() {
     return `${PINATA_GATEWAY}${img}`;
   };
 
-  const inputClass = (editable) =>
-    `w-full border border-gray-300 rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent ${
-      !editable ? "bg-gray-100 cursor-not-allowed text-gray-600" : ""
+  const inputClass = (editable, hasError) =>
+    `w-full border rounded-lg p-3 focus:outline-none focus:ring-2 transition-colors ${
+      !editable
+        ? "bg-gray-100 cursor-not-allowed text-gray-600 border-gray-300"
+        : hasError
+          ? "border-red-400 focus:ring-red-300 bg-red-50"
+          : "border-gray-300 focus:ring-green-500 focus:border-transparent"
     }`;
+
+  // Reuse same styling for selects
+  const selectClass = (editable, hasError) => inputClass(editable, hasError);
+
+  const FieldError = ({ name }) =>
+    errors[name] ? (
+      <p className="text-xs text-red-500 mt-1 flex items-center gap-1">
+        <span>⚠</span> {errors[name]}
+      </p>
+    ) : null;
+
+  const hasAnyError = isEditing && Object.values(errors).some(Boolean);
 
   // ── Loading ───────────────────────────────────────────────────────────────
   if (loadingProfile) return (
@@ -156,7 +233,7 @@ export default function Profile() {
           </button>
         ) : (
           <div className="flex gap-3">
-            <button onClick={handleSave} disabled={saving || uploading}
+            <button onClick={handleSave} disabled={saving || uploading || hasAnyError}
               className="px-5 py-2.5 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors font-medium flex items-center gap-2 disabled:opacity-60">
               {saving ? <Loader2 size={18} className="animate-spin" /> : <Save size={18} />}
               {saving ? "Saving..." : "Save Changes"}
@@ -241,7 +318,8 @@ export default function Profile() {
                   <div key={f.name}>
                     <label className="block text-sm font-medium text-gray-700 mb-2">{f.label}</label>
                     <input type="text" name={f.name} value={form[f.name]} disabled={!isEditing}
-                      onChange={handleChange} className={inputClass(isEditing)} />
+                      onChange={handleChange} className={inputClass(isEditing, !!errors[f.name])} />
+                    <FieldError name={f.name} />
                   </div>
                 ))}
               </div>
@@ -253,14 +331,17 @@ export default function Profile() {
                     <Mail size={16} /> Email Address
                   </label>
                   <input type="email" name="email" value={form.email} disabled={!isEditing}
-                    onChange={handleChange} className={inputClass(isEditing)} />
+                    onChange={handleChange} className={inputClass(isEditing, !!errors.email)} />
+                  <FieldError name="email" />
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2 flex items-center gap-2">
                     <Phone size={16} /> Mobile Number
                   </label>
                   <input type="tel" name="mobileNumber" value={form.mobileNumber} disabled={!isEditing}
-                    onChange={handleChange} placeholder="09XXXXXXXXX" className={inputClass(isEditing)} />
+                    onChange={handleChange} placeholder="09XXXXXXXXX"
+                    className={inputClass(isEditing, !!errors.mobileNumber)} />
+                  <FieldError name="mobileNumber" />
                 </div>
               </div>
 
@@ -271,7 +352,10 @@ export default function Profile() {
                     <Calendar size={16} /> Date of Birth
                   </label>
                   <input type="date" name="dateOfBirth" value={form.dateOfBirth} disabled={!isEditing}
-                    onChange={handleChange} className={inputClass(isEditing)} />
+                    onChange={handleChange}
+                    max={new Date().toISOString().split("T")[0]}
+                    className={inputClass(isEditing, !!errors.dateOfBirth)} />
+                  <FieldError name="dateOfBirth" />
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">Gender</label>
@@ -294,19 +378,71 @@ export default function Profile() {
                   <MapPin size={18} className="text-purple-600" /> Address Information
                 </h3>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {[
-                    { label: "House Number", name: "houseNumber" },
-                    { label: "Street",       name: "street"      },
-                    { label: "Barangay",     name: "barangay"    },
-                    { label: "City",         name: "city"        },
-                    { label: "Postal Code",  name: "postalCode"  },
-                  ].map(f => (
-                    <div key={f.name}>
-                      <label className="block text-sm font-medium text-gray-700 mb-2">{f.label}</label>
-                      <input type="text" name={f.name} value={form.address?.[f.name] || ""} disabled={!isEditing}
-                        onChange={handleAddressChange} className={inputClass(isEditing)} />
-                    </div>
-                  ))}
+
+                  {/* House Number */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">House Number</label>
+                    <input type="text" name="houseNumber" value={form.address?.houseNumber || ""} disabled={!isEditing}
+                      onChange={handleAddressChange} className={inputClass(isEditing, !!errors.houseNumber)} />
+                    <FieldError name="houseNumber" />
+                  </div>
+
+                  {/* Street */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Street</label>
+                    <input type="text" name="street" value={form.address?.street || ""} disabled={!isEditing}
+                      onChange={handleAddressChange} className={inputClass(isEditing, !!errors.street)} />
+                    <FieldError name="street" />
+                  </div>
+
+                  {/* City — dropdown when editing, plain text when viewing */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">City / Municipality</label>
+                    {isEditing ? (
+                      <select name="city" value={form.address?.city || ""} onChange={handleAddressChange}
+                        className={selectClass(true, !!errors.city)}>
+                        <option value="">Select City / Municipality</option>
+                        {cities.map(c => (
+                          <option key={c.code} value={c.name}>{c.name}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input type="text" value={form.address?.city || ""} disabled
+                        className={inputClass(false, false)} />
+                    )}
+                    <FieldError name="city" />
+                  </div>
+
+                  {/* Barangay — dropdown when editing (disabled until city is selected) */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Barangay</label>
+                    {isEditing ? (
+                      <select name="barangay" value={form.address?.barangay || ""} onChange={handleAddressChange}
+                        disabled={!form.address?.city}
+                        className={selectClass(!!form.address?.city, !!errors.barangay)}>
+                        <option value="">
+                          {form.address?.city ? "Select Barangay" : "Select city first"}
+                        </option>
+                        {barangays.map(b => (
+                          <option key={b.code} value={b.name}>{b.name}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input type="text" value={form.address?.barangay || ""} disabled
+                        className={inputClass(false, false)} />
+                    )}
+                    <FieldError name="barangay" />
+                  </div>
+
+                  {/* Postal Code */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Postal Code</label>
+                    <input type="text" name="postalCode" value={form.address?.postalCode || ""} disabled={!isEditing}
+                      onChange={handleAddressChange} placeholder="e.g. 2400"
+                      className={inputClass(isEditing, !!errors.postalCode)} />
+                    <FieldError name="postalCode" />
+                  </div>
+
                 </div>
 
                 {!isEditing && form.address && (

@@ -5,16 +5,18 @@ import { BrowserProvider } from "ethers";
 import { useUserContext } from "../context/UserContext.jsx";
 import { getNonce, verifySignature } from "../services/authService.js";
 import { ensureSFuel } from "../services/sFuelService.js";
+import { switchToSkaleNetwork } from "../utils/skaleNetwork.js";
 
 export default function Login() {
   const { login, user } = useUserContext();
   const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
+  const [networkError, setNetworkError] = useState("");
 
-  const { open }                         = useAppKit();
-  const { address, isConnected }         = useAppKitAccount();
-  const { walletProvider }               = useAppKitProvider("eip155");
-  const { disconnect }                   = useDisconnect();
+  const { open }           = useAppKit();
+  const { address, isConnected } = useAppKitAccount();
+  const { walletProvider } = useAppKitProvider("eip155");
+  const { disconnect }     = useDisconnect();
 
   // Auto-trigger signing after wallet connects
   useEffect(() => {
@@ -25,7 +27,19 @@ export default function Login() {
   }, [isConnected, address, walletProvider]);
 
   const handleSign = async (walletAddress, provider) => {
+    setNetworkError("");
     try {
+      // ── 1. Ensure correct network before anything else ─────────────────
+      try {
+        await switchToSkaleNetwork(provider);
+      } catch (netErr) {
+        // User rejected the network switch prompt
+        setNetworkError("Please switch to SKALE Europa Hub Testnet to continue.");
+        setLoading(false);
+        return;
+      }
+
+      // ── 2. Get nonce ───────────────────────────────────────────────────
       let nonce;
       try {
         nonce = await getNonce(walletAddress);
@@ -35,10 +49,11 @@ export default function Login() {
         return;
       }
 
-      const ethersProvider = new BrowserProvider(provider);
-      const signer = await ethersProvider.getSigner();
-      const messageToSign = `Sign this message to authenticate: ${nonce}`;
-      const signature = await signer.signMessage(messageToSign);
+      // ── 3. Sign & verify ───────────────────────────────────────────────
+      const ethersProvider  = new BrowserProvider(provider);
+      const signer          = await ethersProvider.getSigner();
+      const messageToSign   = `Sign this message to authenticate: ${nonce}`;
+      const signature       = await signer.signMessage(messageToSign);
 
       const loggedInUser = await verifySignature(walletAddress, signature);
       login(loggedInUser);
@@ -53,6 +68,7 @@ export default function Login() {
   };
 
   const handleLogin = async () => {
+    setNetworkError("");
     setLoading(true);
     try {
       if (!isConnected) {
@@ -93,6 +109,14 @@ export default function Login() {
             ? `Logged in as ${user.firstName}`
             : "Connect your wallet to continue."}
         </p>
+
+        {/* Network error banner */}
+        {networkError && (
+          <div className="mb-4 px-4 py-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-600 text-left flex items-start gap-2">
+            <span className="mt-0.5">⚠️</span>
+            <span>{networkError}</span>
+          </div>
+        )}
 
         <button
           onClick={handleLogin}

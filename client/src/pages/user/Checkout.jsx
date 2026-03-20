@@ -20,7 +20,6 @@ const ORDER_MANAGER_ADDRESS = import.meta.env.VITE_ORDER_MANAGER_ADDRESS;
 const TOKEN_ADDRESS         = import.meta.env.VITE_TOKEN_ADDRESS;
 const authHeader            = () => ({ Authorization: `Bearer ${getToken()}` });
 
-// Dedicated SKALE RPC for read calls — avoids CALL_EXCEPTION on mobile
 const SKALE_RPC = "https://juicy-low-small-testnet.skalenodes.com/v1";
 
 const TOKEN_ABI = [
@@ -33,7 +32,6 @@ const STEPS = [
   { id: 1, label: "Address", icon: MapPin },
   { id: 2, label: "Review",  icon: CheckCircle },
 ];
-
 
 const LABEL_ICON = { Home, Work: Briefcase, Other: MapPin };
 
@@ -86,12 +84,13 @@ export default function CheckoutPage() {
   const [balanceLoading, setBalanceLoading] = useState(false);
   const [walletReady, setWalletReady]       = useState(false);
 
-  // Track wallet readiness
+  // Tracks raw input values per item key while typing
+  const [qtyInputs, setQtyInputs] = useState({});
+
   useEffect(() => {
     setWalletReady(isConnected && !!walletProvider);
   }, [isConnected, walletProvider]);
 
-  // ── approveAGT — uses dedicated SKALE RPC for reads, WalletConnect for writes
   const approveAGT = async (amountInAGT) => {
     if (!walletProvider) throw new Error("Wallet not connected. Please reconnect.");
 
@@ -99,7 +98,6 @@ export default function CheckoutPage() {
     const signer       = await provider.getSigner();
     const owner        = await signer.getAddress();
 
-    // Use direct SKALE RPC for allowance read — avoids CALL_EXCEPTION on mobile
     const readProvider = new ethers.JsonRpcProvider(SKALE_RPC);
     const tokenRead    = new ethers.Contract(TOKEN_ADDRESS, TOKEN_ABI, readProvider);
     const tokenWrite   = new ethers.Contract(TOKEN_ADDRESS, TOKEN_ABI, signer);
@@ -109,7 +107,6 @@ export default function CheckoutPage() {
       const allowance = await tokenRead.allowance(owner, ORDER_MANAGER_ADDRESS);
       if (allowance >= amountWei) return;
     } catch (err) {
-      // If allowance check fails, proceed with approve anyway
       console.warn("allowance check failed, proceeding with approve:", err.message);
     }
 
@@ -132,6 +129,10 @@ export default function CheckoutPage() {
       try {
         setLoading(true);
         setCartItems(passedItems);
+        // Seed qtyInputs from passed items
+        const inputs = {};
+        passedItems.forEach(i => { inputs[itemKey(i)] = String(i.quantity); });
+        setQtyInputs(inputs);
         const addrs = await getAddresses();
         setAddresses(addrs);
         const def = addrs.find(a => a.isDefault);
@@ -160,11 +161,38 @@ export default function CheckoutPage() {
     return () => { cancelled = true; };
   }, [step, isConnected, connectedAddress]);
 
-  const updateQty = (key, delta) =>
+  // ── Quantity helpers ──────────────────────────────────────────────────────
+  const handleQtyStep = (key, delta, stock) => {
     setCartItems(prev =>
-      prev.map(i => itemKey(i) === key ? { ...i, quantity: Math.max(1, i.quantity + delta) } : i)
+      prev.map(i => {
+        if (itemKey(i) !== key) return i;
+        const newQty = Math.min(Math.max(i.quantity + delta, 1), stock);
+        setQtyInputs(p => ({ ...p, [key]: String(newQty) }));
+        return { ...i, quantity: newQty };
+      })
     );
-  const removeItem = (key) => setCartItems(prev => prev.filter(i => itemKey(i) !== key));
+  };
+
+  const handleQtyInput = (key, val) => {
+    setQtyInputs(prev => ({ ...prev, [key]: val }));
+  };
+
+  const handleQtyBlur = (key, stock) => {
+    setCartItems(prev =>
+      prev.map(i => {
+        if (itemKey(i) !== key) return i;
+        const num  = parseInt(qtyInputs[key] ?? "", 10);
+        const safe = isNaN(num) || num < 1 ? 1 : Math.min(num, stock);
+        setQtyInputs(p => ({ ...p, [key]: String(safe) }));
+        return { ...i, quantity: safe };
+      })
+    );
+  };
+
+  const removeItem = (key) => {
+    setCartItems(prev => prev.filter(i => itemKey(i) !== key));
+    setQtyInputs(prev => { const n = { ...prev }; delete n[key]; return n; });
+  };
 
   const applyCoupon = async () => {
     if (!couponCode.trim()) return;
@@ -384,7 +412,8 @@ export default function CheckoutPage() {
                 ) : (
                   <div className="divide-y divide-gray-50">
                     {cartItems.map(item => {
-                      const key = itemKey(item);
+                      const key      = itemKey(item);
+                      const inputVal = qtyInputs[key] ?? String(item.quantity);
                       return (
                         <div key={key} className="px-6 py-4 flex items-center gap-4 hover:bg-gray-50/50 transition-colors">
                           <img src={`https://bronze-magnificent-constrictor-556.mypinata.cloud/ipfs/${item.imageCID}`}
@@ -400,12 +429,26 @@ export default function CheckoutPage() {
                             <p className="text-xs text-gray-400">{item.category} · Product #{item.productId}</p>
                             <p className="text-green-600 font-bold text-sm mt-0.5">{Number(item.pricePerUnit).toFixed(2)} AGT / unit</p>
                           </div>
-                          <div className="flex items-center gap-2">
-                            <button onClick={() => updateQty(key, -1)} className="w-7 h-7 rounded-lg bg-gray-100 flex items-center justify-center hover:bg-gray-200 transition-colors">
+                          <div className="flex items-center border border-gray-200 rounded-lg overflow-hidden">
+                            <button
+                              onClick={() => handleQtyStep(key, -1, item.stock)}
+                              disabled={item.quantity <= 1}
+                              className="w-7 h-7 flex items-center justify-center hover:bg-gray-100 disabled:opacity-40 transition-colors">
                               <Minus className="w-3 h-3 text-gray-600" />
                             </button>
-                            <span className="w-6 text-center font-semibold text-gray-900 text-sm">{item.quantity}</span>
-                            <button onClick={() => updateQty(key, 1)} className="w-7 h-7 rounded-lg bg-gray-100 flex items-center justify-center hover:bg-gray-200 transition-colors">
+                            <input
+                              type="number"
+                              min={1}
+                              max={item.stock}
+                              value={inputVal}
+                              onChange={e => handleQtyInput(key, e.target.value)}
+                              onBlur={() => handleQtyBlur(key, item.stock)}
+                              className="w-10 text-center font-semibold text-gray-900 text-sm border-x border-gray-200 focus:outline-none py-1 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                            />
+                            <button
+                              onClick={() => handleQtyStep(key, 1, item.stock)}
+                              disabled={item.quantity >= item.stock}
+                              className="w-7 h-7 flex items-center justify-center hover:bg-gray-100 disabled:opacity-40 transition-colors">
                               <Plus className="w-3 h-3 text-gray-600" />
                             </button>
                           </div>

@@ -40,8 +40,26 @@ export default function ProductDetails({ product }) {
     setQuantity(1);
   };
 
-  const increment = () => setQuantity(q => Math.min(q + 1, activeStock));
-  const decrement = () => setQuantity(q => Math.max(q - 1, 1));
+  const increment = () => setQuantity(q => Math.min(Number(q) + 1, activeStock));
+  const decrement = () => setQuantity(q => Math.max(Number(q) - 1, 1));
+
+  const handleQuantityInput = (e) => {
+    const val = e.target.value;
+    // Allow empty string while typing
+    if (val === "") { setQuantity(""); return; }
+    const num = parseInt(val, 10);
+    if (isNaN(num)) return;
+    // Clamp: min 1, max activeStock
+    setQuantity(Math.min(Math.max(num, 1), activeStock));
+  };
+
+  const handleQuantityBlur = () => {
+    // On blur, ensure value is a valid number within range
+    const num = parseInt(quantity, 10);
+    if (isNaN(num) || num < 1) setQuantity(1);
+    else if (num > activeStock) setQuantity(activeStock);
+    else setQuantity(num);
+  };
 
   // ── Cart / Buy ────────────────────────────────────────────────────────────
   const [addingToCart,  setAddingToCart]  = useState(false);
@@ -55,10 +73,6 @@ export default function ProductDetails({ product }) {
   const removeNotification = (id) =>
     setNotifications(prev => prev.filter(n => n.id !== id));
 
-  // FIX: Added sellerAddress to cartPayload so CheckoutPage can group items
-  // by seller and the contract's BatchSellerMismatch guard is never triggered.
-  // Also fixed quantity — it was passed as a separate arg but addToCart expects
-  // it inside the payload object.
   const cartPayload = () => ({
     productId:     product.productId ?? product.id,
     name:          hasVariants ? `${product.name} (${activeLabel})` : product.name,
@@ -66,10 +80,10 @@ export default function ProductDetails({ product }) {
     imageCID:      product.imageCID,
     category:      product.category,
     stock:         activeStock,
-    sellerAddress: product.sellerAddress ?? null,  // FIX: was missing entirely
+    sellerAddress: product.sellerAddress ?? null,
     variantLabel:  activeLabel ?? null,
     variantIndex:  selVariant,
-    quantity,
+    quantity:      Number(quantity),
   });
 
   const handleAddToCart = async () => {
@@ -80,7 +94,7 @@ export default function ProductDetails({ product }) {
     }
     setAddingToCart(true);
     try {
-      await addToCart(cartPayload());  // FIX: quantity is now inside the payload
+      await addToCart(cartPayload());
       addNotification(`"${product.name}${activeLabel ? ` (${activeLabel})` : ""}" added to cart!`, "success");
     } catch (err) {
       addNotification(err.response?.data?.error || "Failed to add to cart.", "error");
@@ -89,8 +103,6 @@ export default function ProductDetails({ product }) {
     }
   };
 
-  // FIX: handleBuy also passes sellerAddress so "Buy Now" (direct to checkout)
-  // works correctly without going through the cart.
   const handleBuy = () => {
     if (hasVariants && selVariant === null) {
       addNotification("Please select a variant first.", "error");
@@ -98,7 +110,7 @@ export default function ProductDetails({ product }) {
     }
     navigate("/checkout", {
       state: {
-        items: [cartPayload()],  // FIX: cartPayload already includes quantity + sellerAddress
+        items: [cartPayload()],
       },
     });
   };
@@ -143,7 +155,7 @@ export default function ProductDetails({ product }) {
               </span>
             </div>
 
-            {/* Price — updates with variant */}
+            {/* Price */}
             <p className="text-green-600 text-2xl font-bold mt-2">
               {Number(activePrice).toFixed(2)} AGT
               {activeLabel && (
@@ -151,7 +163,7 @@ export default function ProductDetails({ product }) {
               )}
             </p>
 
-            {/* Stock — updates with variant */}
+            {/* Stock */}
             <p className={`text-sm mt-1 ${activeStock <= 5 ? "text-orange-500 font-medium" : "text-gray-500"}`}>
               {activeStock === 0
                 ? "Out of stock"
@@ -204,11 +216,25 @@ export default function ProductDetails({ product }) {
             <div className="flex items-center gap-3 mt-5">
               <span className="text-sm font-medium text-gray-500">Quantity</span>
               <div className="flex items-center justify-center border border-gray-300 rounded-lg overflow-hidden">
-                <button onClick={decrement} disabled={quantity <= 1}
-                  className="cursor-pointer px-3 py-1 hover:bg-gray-100 text-gray-500 disabled:opacity-40">−</button>
-                <span className="px-4 py-1 text-sm text-gray-700 font-medium min-w-[2rem] text-center">{quantity}</span>
-                <button onClick={increment} disabled={quantity >= activeStock}
-                  className="cursor-pointer px-3 py-1 hover:bg-gray-100 text-gray-500 disabled:opacity-40">+</button>
+                <button
+                  onClick={decrement}
+                  disabled={Number(quantity) <= 1}
+                  className="cursor-pointer px-3 py-1 hover:bg-gray-100 text-gray-500 disabled:opacity-40"
+                >−</button>
+                <input
+                  type="number"
+                  min={1}
+                  max={activeStock}
+                  value={quantity}
+                  onChange={handleQuantityInput}
+                  onBlur={handleQuantityBlur}
+                  className="w-12 py-1 text-sm text-gray-700 font-medium text-center border-x border-gray-300 focus:outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                />
+                <button
+                  onClick={increment}
+                  disabled={Number(quantity) >= activeStock}
+                  className="cursor-pointer px-3 py-1 hover:bg-gray-100 text-gray-500 disabled:opacity-40"
+                >+</button>
               </div>
               {hasVariants && selVariant !== null && (
                 <span className="text-xs text-gray-400">{activeStock} available</span>

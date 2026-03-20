@@ -57,6 +57,9 @@ export default function CartPage() {
   const [confirmClear, setConfirmClear] = useState(false);
   const [error,        setError]        = useState("");
 
+  // Tracks the raw input value per item key (allows empty string while typing)
+  const [qtyInputs, setQtyInputs] = useState({});
+
   useEffect(() => {
     if (!user) return navigate("/login");
     let cancelled = false;
@@ -67,6 +70,10 @@ export default function CartPage() {
         if (!cancelled) {
           setItems(data);
           setSelected(new Set(data.map(itemKey)));
+          // Seed qtyInputs from loaded data
+          const inputs = {};
+          data.forEach(i => { inputs[itemKey(i)] = String(i.quantity); });
+          setQtyInputs(inputs);
         }
       } catch (err) {
         if (!cancelled) setError("Failed to load cart.");
@@ -88,16 +95,42 @@ export default function CartPage() {
       return next;
     });
 
-  const handleQty = async (item, delta) => {
-    const newQty = item.quantity + delta;
-    if (newQty < 1 || newQty > item.stock) return;
+  // ── Quantity helpers ──────────────────────────────────────────────────────
+  const commitQty = async (item, newQty) => {
     const key = itemKey(item);
+    if (newQty === item.quantity) return;
     setUpdating(key);
     try {
       await updateCartItem(item.id, newQty);
       setItems(prev => prev.map(i => itemKey(i) === key ? { ...i, quantity: newQty } : i));
-    } catch { setError("Failed to update quantity."); }
-    finally { setUpdating(null); }
+    } catch {
+      setError("Failed to update quantity.");
+      // Revert input to last confirmed value
+      setQtyInputs(prev => ({ ...prev, [key]: String(item.quantity) }));
+    } finally {
+      setUpdating(null);
+    }
+  };
+
+  const handleQtyStep = (item, delta) => {
+    const key    = itemKey(item);
+    const newQty = Math.min(Math.max(item.quantity + delta, 1), item.stock);
+    setQtyInputs(prev => ({ ...prev, [key]: String(newQty) }));
+    commitQty(item, newQty);
+  };
+
+  const handleQtyInput = (item, val) => {
+    const key = itemKey(item);
+    setQtyInputs(prev => ({ ...prev, [key]: val }));
+  };
+
+  const handleQtyBlur = (item) => {
+    const key  = itemKey(item);
+    const raw  = qtyInputs[key] ?? "";
+    const num  = parseInt(raw, 10);
+    const safe = isNaN(num) || num < 1 ? 1 : Math.min(num, item.stock);
+    setQtyInputs(prev => ({ ...prev, [key]: String(safe) }));
+    commitQty(item, safe);
   };
 
   const handleRemove = async (item) => {
@@ -107,6 +140,7 @@ export default function CartPage() {
       await removeCartItem(item.id);
       setItems(prev => prev.filter(i => itemKey(i) !== key));
       setSelected(prev => { const n = new Set(prev); n.delete(key); return n; });
+      setQtyInputs(prev => { const n = { ...prev }; delete n[key]; return n; });
     } catch { setError("Failed to remove item."); }
     finally { setRemoving(null); }
   };
@@ -118,6 +152,7 @@ export default function CartPage() {
       await clearCart();
       setItems([]);
       setSelected(new Set());
+      setQtyInputs({});
     } catch { setError("Failed to clear cart."); }
     finally { setClearing(false); }
   };
@@ -138,8 +173,6 @@ export default function CartPage() {
   const subtotal      = selectedItems.reduce((s, i) => s + Number(i.pricePerUnit) * i.quantity, 0);
   const platformFee   = subtotal * 0.0005;
 
-  // Count unique sellers by sellerAddress — fallback to sellerId or 1 per item
-  // if sellerAddress is missing (prevents zero logistics fee)
   const uniqueSellers = selectedItems.length === 0 ? 0 :
     new Set(
       selectedItems.map(i =>
@@ -225,7 +258,6 @@ export default function CartPage() {
         {items.length === 0 ? (
           <EmptyCart onShop={() => navigate("/")} />
         ) : (
-          /* Stack on mobile, side-by-side on lg */
           <div className="flex flex-col lg:grid lg:grid-cols-3 gap-4 sm:gap-6">
 
             {/* ── Cart items ──────────────────────────────────────────────── */}
@@ -253,6 +285,7 @@ export default function CartPage() {
                 const isSelected = selected.has(key);
                 const isUpdating = updating === key;
                 const isRemoving = removing === key;
+                const inputVal   = qtyInputs[key] ?? String(item.quantity);
 
                 return (
                   <div key={key}
@@ -301,15 +334,29 @@ export default function CartPage() {
                           {isRemoving ? <Loader2 className="w-4 h-4 animate-spin" /> : <X className="w-4 h-4" />}
                         </button>
                         <div className="flex items-center gap-1 sm:gap-2">
-                          <button onClick={() => handleQty(item, -1)}
+                          <button
+                            onClick={() => handleQtyStep(item, -1)}
                             disabled={item.quantity <= 1 || isUpdating}
                             className="w-6 h-6 sm:w-7 sm:h-7 rounded-lg bg-gray-100 flex items-center justify-center hover:bg-gray-200 disabled:opacity-40 transition-colors">
                             <Minus className="w-2.5 h-2.5 sm:w-3 sm:h-3 text-gray-600" />
                           </button>
-                          <span className="w-6 sm:w-8 text-center font-bold text-gray-900 text-xs sm:text-sm">
-                            {isUpdating ? <Loader2 className="w-3 h-3 animate-spin mx-auto" /> : item.quantity}
-                          </span>
-                          <button onClick={() => handleQty(item, 1)}
+                          {isUpdating ? (
+                            <span className="w-8 sm:w-10 flex justify-center">
+                              <Loader2 className="w-3 h-3 animate-spin text-gray-400" />
+                            </span>
+                          ) : (
+                            <input
+                              type="number"
+                              min={1}
+                              max={item.stock}
+                              value={inputVal}
+                              onChange={e => handleQtyInput(item, e.target.value)}
+                              onBlur={() => handleQtyBlur(item)}
+                              className="w-8 sm:w-10 text-center font-bold text-gray-900 text-xs sm:text-sm border-x border-gray-200 focus:outline-none bg-transparent py-0.5 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                            />
+                          )}
+                          <button
+                            onClick={() => handleQtyStep(item, 1)}
                             disabled={item.quantity >= item.stock || isUpdating}
                             className="w-6 h-6 sm:w-7 sm:h-7 rounded-lg bg-gray-100 flex items-center justify-center hover:bg-gray-200 disabled:opacity-40 transition-colors">
                             <Plus className="w-2.5 h-2.5 sm:w-3 sm:h-3 text-gray-600" />
