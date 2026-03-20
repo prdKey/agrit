@@ -14,12 +14,13 @@ import {
 } from "lucide-react";
 import axios from "axios";
 import { getToken } from "../../services/tokenService.js";
-import { SKALE_RPC } from "../../utils/skaleNetwork.js";
 
 const API_URL               = import.meta.env.VITE_API_URL;
 const ORDER_MANAGER_ADDRESS = import.meta.env.VITE_ORDER_MANAGER_ADDRESS;
 const TOKEN_ADDRESS         = import.meta.env.VITE_TOKEN_ADDRESS;
 const authHeader            = () => ({ Authorization: `Bearer ${getToken()}` });
+
+import { SKALE_RPC } from "../../utils/skaleNetwork.js";
 
 const TOKEN_ABI = [
   "function approve(address spender, uint256 amount) returns (bool)",
@@ -111,7 +112,23 @@ export default function CheckoutPage() {
 
     try {
       const tx = await tokenWrite.approve(ORDER_MANAGER_ADDRESS, amountWei);
-      await tx.wait();
+
+      // ── Mobile-safe tx confirmation ──────────────────────────────────────
+      // tx.wait() uses BrowserProvider polling (eth_blockNumber) which fails
+      // on mobile WalletConnect. Instead, poll for the receipt directly via
+      // the dedicated SKALE JsonRpcProvider.
+      const pollReceipt = async (txHash, retries = 60, intervalMs = 3000) => {
+        for (let i = 0; i < retries; i++) {
+          try {
+            const receipt = await readProvider.getTransactionReceipt(txHash);
+            if (receipt) return receipt;
+          } catch (_) { /* ignore transient errors, keep polling */ }
+          await new Promise(r => setTimeout(r, intervalMs));
+        }
+        throw new Error("Transaction confirmation timed out. Please check your wallet.");
+      };
+
+      await pollReceipt(tx.hash);
     } catch (err) {
       if (err.code === 4001 || err.message?.includes("rejected")) {
         throw new Error("Transaction rejected. Please approve in your wallet.");

@@ -48,7 +48,22 @@ const approveAGT = async (amountInAGT, walletProvider) => {
   const tokenWrite = new ethers.Contract(TOKEN_ADDRESS, TOKEN_ABI, signer);
   try {
     const tx = await tokenWrite.approve(ORDER_MANAGER_ADDRESS, amountWei);
-    await tx.wait();
+
+    // ── Mobile-safe tx confirmation ────────────────────────────────────────
+    // tx.wait() uses BrowserProvider polling (eth_blockNumber) which fails
+    // on mobile WalletConnect. Poll the receipt via dedicated SKALE RPC instead.
+    const pollReceipt = async (txHash, retries = 60, intervalMs = 3000) => {
+      for (let i = 0; i < retries; i++) {
+        try {
+          const receipt = await readProvider.getTransactionReceipt(txHash);
+          if (receipt) return receipt;
+        } catch (_) { /* ignore transient errors, keep polling */ }
+        await new Promise(r => setTimeout(r, intervalMs));
+      }
+      throw new Error("Transaction confirmation timed out. Please check your wallet.");
+    };
+
+    await pollReceipt(tx.hash);
   } catch (err) {
     if (err.code === 4001 || err.message?.includes("rejected")) {
       throw new Error("Transaction rejected. Please approve in your wallet.");
